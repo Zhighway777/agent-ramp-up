@@ -1,0 +1,690 @@
+---
+title: "2026 AI Agent 基础设施深度调研：Agent OS / Harness 工程 / 协议生态"
+date: 2026-05-15
+tags: [agent-infra, agent-os, harness, mcp, a2a, deep-research, benchmark, security, memory, orchestration]
+category: case-studies
+difficulty: ⭐️⭐️⭐️⭐️⭐️
+---
+
+# 2026 AI Agent 基础设施深度调研报告
+
+> **作者**：jasper.zeng | **日期**：2026-05-14  
+> **定位**：面向 AI Agent 从业者的全景式技术雷达，覆盖 Agent OS、Harness 工程、协议生态、安全模型、记忆架构、编排模式与基准评测七大维度。
+
+---
+
+## 目录
+
+- [一、全景图：2026 Agent 技术栈](#一全景图2026-agent-技术栈)
+- [二、Agent OS — 给 Agent 一个操作系统](#二agent-os--给-agent-一个操作系统)
+- [三、Harness 工程 — 决定 Agent 产品质量的核心层](#三harness-工程--决定-agent-产品质量的核心层)
+- [四、协议层 — MCP 与 A2A 双轨并行](#四协议层--mcp-与-a2a-双轨并行)
+- [五、Agent 记忆架构 — 从无状态到持久智能](#五agent-记忆架构--从无状态到持久智能)
+- [六、多 Agent 编排模式 — 生产级拓扑选型](#六多-agent-编排模式--生产级拓扑选型)
+- [七、Agent 安全与沙箱 — 零信任原则](#七agent-安全与沙箱--零信任原则)
+- [八、基准评测 — 如何客观衡量 Coding Agent](#八基准评测--如何客观衡量-coding-agent)
+- [九、Coding Agent 竞争格局](#九coding-agent-竞争格局)
+- [十、趋势总结与行动建议](#十趋势总结与行动建议)
+
+---
+
+## 一、全景图：2026 Agent 技术栈
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    开发者交互层                            │
+│  Cursor 3.0 │ Claude Code │ Windsurf 2.0 │ Devin        │
+├──────────────────────────────────────────────────────────┤
+│                    协议层                                 │
+│  MCP (Agent↔Tool)  │  A2A (Agent↔Agent)                 │
+├──────────────────────────────────────────────────────────┤
+│                    Harness 层 (10 组件)                   │
+│  System Prompt │ Tool Registry │ Memory │ Permission     │
+│  Sub-agents │ Hooks │ Context Mgmt │ Observability │ Eval│
+├──────────────────────────────────────────────────────────┤
+│                    Agent OS 层                            │
+│  agentOS (Rivet) │ Qualixar OS │ Agno v2.5              │
+├──────────────────────────────────────────────────────────┤
+│                    运行时隔离层                            │
+│  WebAssembly │ V8 Isolates │ MicroVM │ gVisor │ Docker  │
+├──────────────────────────────────────────────────────────┤
+│                    模型层                                 │
+│  Claude Opus 4.7 │ GPT-5.4 │ Gemini 3.1 │ DeepSeek     │
+└──────────────────────────────────────────────────────────┘
+```
+
+**2026 年三大范式转变**：
+1. **Harness > Model**：Harness 工程已成为差异化竞争力，57% 的企业 Agent 项目失败源自编排设计而非单个 Agent 能力
+2. **协议标准化**：MCP（月下载 9700 万）+ A2A 双协议体系统一了 Agent 的对外连接方式
+3. **OS 化**：Agent 从"进程"升级为"带 OS 的虚拟机"，拥有文件系统、网络、进程管理
+
+---
+
+## 二、Agent OS — 给 Agent 一个操作系统
+
+### 2.1 为什么 Agent 需要 OS？
+
+传统 Agent 直接在宿主进程中运行，面临三个核心问题：
+- **隔离性差**：Agent 可以访问宿主文件系统和网络，存在安全风险
+- **资源浪费**：每个 Agent 启动一个 Docker 容器，冷启动慢（数百毫秒到数秒）、内存开销大（~1GB）
+- **互操作性差**：不同框架的 Agent 无法共享运行环境
+
+Agent OS 通过在进程内虚拟化一个轻量 OS 来解决这些问题。
+
+### 2.2 agentOS (Rivet) — 当前最成熟的方案
+
+**发布**：2026 年 4 月 | **许可**：Apache 2.0  
+**GitHub**：[rivet-dev/agent-os](https://github.com/rivet-dev/agent-os)
+
+#### 架构
+
+agentOS 在 Node.js 进程内运行一个虚拟 OS 内核，提供三层运行时：
+
+```
+┌─────────────────────────────────────────┐
+│          Agent Code (用户逻辑)            │
+├─────────────────────────────────────────┤
+│  V8 Isolate    │  WebAssembly Modules   │
+│  (Agent 代码)   │  (coreutils/grep/jq)  │
+├─────────────────────────────────────────┤
+│         Virtual POSIX Kernel             │
+│  ┌─────────┬──────────┬──────────────┐  │
+│  │ VFS     │ Process  │ Network      │  │
+│  │ (mount) │ Table    │ Stack        │  │
+│  └─────────┴──────────┴──────────────┘  │
+├─────────────────────────────────────────┤
+│         Host Node.js Process             │
+└─────────────────────────────────────────┘
+```
+
+- **V8 Isolates**：Chrome 标签页级别的隔离，每个 Agent 有独立的内存空间
+- **WebAssembly**：编译 POSIX 工具链（coreutils, grep, curl, jq, sqlite3）为 WASM 模块
+- **虚拟文件系统**：POSIX 兼容，支持多种后端挂载（S3, SQLite, 宿主目录, 内存）
+- **虚拟网络栈**：可编程的网络层，支持代理和策略控制
+
+#### 性能对比
+
+| 指标 | agentOS | E2B（最快沙箱） | Docker | 倍率 |
+|------|---------|----------------|--------|------|
+| 冷启动 (p50) | 4.8 ms | 440 ms | ~2,000 ms | 92-416x 更快 |
+| 冷启动 (p99) | 6.1 ms | 3,150 ms | ~5,000 ms | 516-820x 更快 |
+| 内存/实例 | ~131 MB | ~1,024 MB | ~1,024 MB | 8x 更小 |
+| 成本 | 基线 | 32x | ~32x | 32x 更便宜 |
+
+#### 关键创新：混合模式
+
+agentOS 默认使用轻量 VM，但当 Agent 需要真实浏览器或原生二进制时，可以按需升级为完整沙箱，并将沙箱文件系统挂载为本地目录：
+
+```
+默认路径：Agent → V8 Isolate + WASM（毫秒级启动）
+升级路径：Agent → 检测到需要浏览器 → 启动沙箱 → 挂载为 /sandbox → 完成后释放
+```
+
+#### 安全模型
+
+- **默认拒绝**（deny-by-default）：Agent 代码无法访问挂载外的宿主文件
+- **双信任边界**：运行时边界（V8 Isolate）+ 宿主边界（应用代码管理配置和密钥）
+- **Host Tools**：后端函数直接暴露为 VM 内的 CLI 命令，无网络跳转
+
+#### 兼容性
+
+已支持的 Agent 框架：PI, Claude Code, Codex, Amp, OpenCode（更多即将支持）
+
+### 2.3 Qualixar OS — 学术界的通用 Agent OS
+
+**论文**：[arxiv.org/abs/2604.06392](https://arxiv.org/abs/2604.06392) | 2026 年 4 月
+
+定位为"应用层操作系统"，核心贡献：
+- 支持 **10 个 LLM 提供商**、**8+ Agent 框架**、**7 种通信传输**
+- 定义了 **12 种多 Agent 拓扑**的执行语义（链式、星型、树型、网状等）
+- **LLM 驱动的团队设计**：AI 自动规划 Agent 团队组成和协作方式
+- 包含可视化工作流构建器和技能市场
+
+### 2.4 Agno v2.5 — 三层栈的工业闭环
+
+Agno 定义了完整的 Agent 技术栈：
+
+| 层级 | 职责 | 组件 |
+|------|------|------|
+| Layer 1：框架层 | Agent 开发 | SDK, 工具定义, Prompt 模板 |
+| Layer 2：AgentOS 运行时 | 执行环境 | 隔离, 文件系统, 进程管理 |
+| Layer 3：生产层 | 上线运营 | 编排, 人机协作, 治理, 监控 |
+
+---
+
+## 三、Harness 工程 — 决定 Agent 产品质量的核心层
+
+### 3.1 什么是 Harness？
+
+> **定义**：Harness 是包裹在 AI 模型外层的工程基础设施，将"原始模型能力"转化为"可靠的产品行为"。
+
+类比：模型是发动机，Harness 是整辆车（底盘、悬挂、刹车、安全气囊、导航系统）。
+
+**2026 年的核心共识**：决定 Agent 产品质量的不是模型，而是 Harness。
+
+### 3.2 Harness 十大组件
+
+2026 年行业已收敛到一个 10 组件的标准架构：
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Agent Harness                        │
+├──────────────┬──────────────┬───────────────────────────┤
+│ 1. System    │ 2. Tool      │ 3. Sandbox               │
+│    Prompt    │    Registry  │    (隔离执行环境)          │
+├──────────────┼──────────────┼───────────────────────────┤
+│ 4. Permission│ 5. Memory    │ 6. Context               │
+│    Model     │    (持久记忆) │    Management             │
+├──────────────┼──────────────┼───────────────────────────┤
+│ 7. Sub-agents│ 8. Hooks     │ 9. Observability         │
+│    (子Agent) │    (生命周期) │    (日志/追踪/指标)       │
+├──────────────┴──────────────┴───────────────────────────┤
+│                 10. Evals (评估)                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+各组件详解：
+
+| # | 组件 | 职责 | 关键设计点 |
+|---|------|------|-----------|
+| 1 | System Prompt | 定义 Agent 身份和行为准则 | 分层结构（核心身份 + 领域规则 + 动态注入） |
+| 2 | Tool Registry | 管理可调用的工具集 | 类型安全的 Schema + 版本控制 |
+| 3 | Sandbox | 隔离执行环境 | 见 Agent OS 层（agentOS / Docker / MicroVM） |
+| 4 | Permission Model | 控制工具调用权限 | 最小权限 + 高风险操作人工审批 |
+| 5 | Memory | 跨会话持久记忆 | 多层记忆（对话/实体/事实/事件/工作记忆） |
+| 6 | Context Management | 管理上下文窗口 | 渐进式披露 + Token 预算控制 |
+| 7 | Sub-agents | 子 Agent 编排 | Supervisor/Router/DAG 模式 |
+| 8 | Hooks | 生命周期钩子 | preToolUse/postToolUse/onError |
+| 9 | Observability | 可观测性 | 结构化日志 + 分布式追踪 + 指标 |
+| 10 | Evals | 质量评估 | 五维评分（正确性/事实性/安全性/轨迹/性能） |
+
+### 3.3 主流执行模式：Planner / Generator / Evaluator
+
+```
+用户请求
+    ↓
+┌─────────┐     ┌───────────┐     ┌───────────┐
+│ Planner │ ──→ │ Generator │ ──→ │ Evaluator │
+│ (规划)  │     │ (执行)    │     │ (评判)    │
+└─────────┘     └───────────┘     └───────────┘
+    ↑                                    │
+    └────── 反馈循环（Plan Repair）───────┘
+```
+
+关键工程挑战：**Plan Repair** — 当早期步骤失败时，Planner 需要动态重写剩余计划。
+
+### 3.4 AHE：可观测性驱动的 Harness 自进化
+
+**论文**：[Agentic Harness Engineering](https://arxiv.org/pdf/2604.25850) | 2026 年 4 月  
+**代码**：[GitHub](https://github.com/china-qijizhifeng/agentic-harness-engineering)
+
+AHE 是 2026 年最重要的 Harness 工程论文。核心问题：**Harness 的优化能否自动化？**
+
+#### 三大可观测性支柱
+
+| 支柱 | 功能 | 解决的问题 |
+|------|------|-----------|
+| **组件可观测性** | 将每个可编辑的 Harness 组件表示为文件级单元 | 动作空间显式化，支持回滚 |
+| **经验可观测性** | 将数百万原始轨迹 Token 蒸馏为分层证据语料 | Agent 可消费的压缩信号 |
+| **决策可观测性** | 每次编辑配对一个自声明的预测，后续用任务结果验证 | 编辑效果归因 |
+
+#### 实验结果
+
+| 基准 | 种子 Harness | AHE 10 轮后 | 对比基线 |
+|------|-------------|-------------|---------|
+| Terminal-Bench 2 | 69.7% | **77.0%** | 超越人工设计的 Codex-CLI (71.9%) |
+| SWE-bench Verified | — | 最高聚合成功率 | Token 消耗减少 12% |
+| 跨模型族迁移 | — | **+5.1 到 +10.1 pp** | 三个模型族均有提升 |
+
+#### 核心启示
+
+AHE 证明了 **Harness 的系统性优化可以补偿模型能力的不足**。一个经过 10 轮自动优化的 Harness，在较弱模型上也能超越使用更强模型但未经优化 Harness 的系统。
+
+### 3.5 评估框架
+
+#### Harness-Evals — 五维评估
+
+开源 Python 框架，归一化评分 0.0-1.0：
+
+| 维度 | 评估内容 | 关键指标 |
+|------|----------|---------|
+| Correctness | 输出是否正确 | 测试通过率, 功能完整性 |
+| Groundedness | 是否基于事实 | 幻觉率, 引用准确性 |
+| Safety | 是否安全 | 注入抵抗, 权限越界检测 |
+| Trajectory | 行动轨迹质量 | 步骤效率, 工具选择合理性 |
+| Performance | 效率 | Token 消耗, 延迟, 成本 |
+
+#### Open Harness — Harness 无关的通用框架
+
+- **Build**：定义带类型状态的 Agent，在 Claude Code / Codex / OpenCode 之间零成本切换
+- **Eval**：录制并确定性重放 Agent 运行轨迹
+- **Deploy**：结构化日志 + 信号追踪的生产级可观测性
+
+### 3.6 合规驱动
+
+**EU AI Act 高风险义务**将于 **2026 年 8 月 2 日**生效。要求的审计制品（风险评估、决策日志、可追溯性、人工监督记录）恰恰是一个设计良好的 Harness 所能自然产出的。这正在加速 Harness 工程的标准化和合规化。
+
+---
+
+## 四、协议层 — MCP 与 A2A 双轨并行
+
+### 4.1 MCP（Model Context Protocol）— 2026 爆发年
+
+**定义**：Agent 与外部工具/数据源之间的标准化连接协议（垂直连接）。
+
+#### 爆发式增长
+
+| 指标 | 数据 |
+|------|------|
+| 月 SDK 下载量 | **9700 万**（发布时 200 万） |
+| 公共 MCP 服务器 | **10,000 - 17,000** 个 |
+| 原生支持平台 | Claude, ChatGPT, Gemini, Copilot, Cursor, VS Code（6 大平台） |
+| 治理 | 2026 年 4 月捐赠给 Linux Foundation / Agentic AI Foundation，100+ 成员组织 |
+
+#### 2026 路线图（四大工作组）
+
+| 方向 | 内容 | 状态 |
+|------|------|------|
+| **传输层演进** | Streamable HTTP 处理有状态会话 + 水平扩展 | 进行中 |
+| **Agent 通信** | Tasks 原语增加重试语义和过期策略 | 进行中 |
+| **服务发现** | `.well-known` 元数据格式，无需建立连接即可发现服务 | 规划中 |
+| **认证合规** | OAuth 支持 + 预注册场景（v1.27.x） | 已发布 |
+
+#### SDK 生态
+
+- TypeScript SDK v1.27.1
+- Python SDK v1.26
+- OpenAI Agents SDK v0.12.5（MCP 重试归一化）
+- Google ADK v2.0（结构化 Task API）
+
+#### 挑战
+
+- **安全**：2026 年 1-2 月已报告 **30+ CVE**
+- **商业化**：不到 **5%** 的 MCP 服务器实现商业化
+- **质量参差**：公共注册表中服务器质量差异巨大
+
+### 4.2 A2A（Agent-to-Agent Protocol）— Google 主导
+
+**定义**：Agent 与 Agent 之间的互操作标准（水平协作）。
+
+#### 核心概念
+
+```
+Agent A                    Agent B
+   │                          │
+   │── Task (contextId) ──→   │
+   │                          │  处理任务
+   │   ←── Message ──────────│  
+   │                          │
+   │── Task (same ctx) ──→   │  同一上下文组
+   │                          │
+```
+
+- **`contextId`**：分组多个 Task/Message，提供跨交互的连续性
+- **无状态 Message**：即时交互（类似 HTTP 请求-响应）
+- **有状态 Task**：长时间运行流程，有完整生命周期（submitted → working → completed/failed）
+- **不透明执行**：Agent 基于声明的能力协作，无需共享内部状态
+
+#### 与 Google Cloud 集成
+
+A2A 已集成 Gemini Enterprise Agent Platform Runtime：
+- 无服务器部署 + 自动扩缩
+- 安全端点 + 托管会话
+- 多 Agent 架构能力
+
+### 4.3 MCP vs A2A 定位
+
+```
+MCP: Agent ↔ Tool/数据源（垂直整合）
+     "Agent 如何使用工具"
+
+A2A: Agent ↔ Agent（水平协作）
+     "Agent 如何委托其他 Agent"
+
+两者互补，非竞争关系。
+MCP 是 Agent 的"手"，A2A 是 Agent 的"同事"。
+```
+
+---
+
+## 五、Agent 记忆架构 — 从无状态到持久智能
+
+### 5.1 为什么传统 RAG 不够？
+
+标准 RAG 假设大规模、异构语料库，但 Agent 记忆是**有界的、连贯的对话流**，信息高度相关。固定 top-k 相似度检索返回冗余上下文，无法区分"必要信息"和"仅仅相似的信息"。
+
+### 5.2 前沿记忆架构
+
+#### xMemory — 解耦 + 聚合
+
+**论文**：[Beyond RAG for Agent Memory](https://arxiv.org/pdf/2602.02007v2)
+
+核心创新：
+1. **解耦**：将记忆拆解为语义组件，按层级组织
+2. **结构感知检索**：选择紧凑、多样的主题，而非相似的段落
+3. **自顶向下展开**：仅在需要降低不确定性时才展开到原始消息
+
+结果：更好的回答质量 + 更低的 Token 消耗。
+
+#### 多层持久记忆框架
+
+**HazelJS 五层记忆系统**：
+
+| 记忆类型 | 功能 | 存储策略 |
+|---------|------|---------|
+| Conversation | 对话历史 | Buffer（最近优先） |
+| Entity | 实体信息 | Vector（语义相关） |
+| Fact | 事实知识 | Hybrid（近期 + 语义） |
+| Event | 事件记录 | Vector |
+| Working | 工作记忆 | Buffer |
+
+三种存储策略：
+- **BufferMemory**：最快，仅按时间排序
+- **VectorMemory**：语义相关性检索
+- **HybridMemory**：结合近期 + 语义（生产推荐）
+
+#### memU — 24/7 主动 Agent 的记忆框架
+
+- 层次化文件系统式记忆结构
+- **双模式检索**：
+  - Fast Context（嵌入向量，毫秒级延迟，后台持续监控）
+  - Deep Reasoning（LLM 参与，仅在检测到相关模式时触发）
+- 大幅降低 24/7 运行的 Token 成本
+
+#### OpenClaw — 12 层自重构记忆
+
+- 结合结构化存储 + 语义搜索 + 知识图谱（3K+ 事实节点）
+- **激活/衰减系统**：记忆有"活跃度"，不常用的衰减
+- Agent 可从持久化文件完全自重构
+
+### 5.3 记忆架构选型建议
+
+| 场景 | 推荐方案 | 理由 |
+|------|---------|------|
+| 短会话 Coding Agent | Buffer + 上下文窗口 | 够用，低延迟 |
+| 长会话 + 跨项目 | Hybrid（Buffer + Vector） | 兼顾近期和语义 |
+| 7x24 自主 Agent | memU 双模式 | Token 成本可控 |
+| 企业知识密集型 | OpenClaw 12 层 + 知识图谱 | 复杂关系推理 |
+
+---
+
+## 六、多 Agent 编排模式 — 生产级拓扑选型
+
+### 6.1 五大核心模式
+
+#### 模式 1：Supervisor（层级管理）
+
+```
+        ┌──────────┐
+        │Supervisor│
+        └────┬─────┘
+     ┌───────┼───────┐
+     ▼       ▼       ▼
+  ┌─────┐┌─────┐┌─────┐
+  │Agent││Agent││Agent│
+  │  A  ││  B  ││  C  │
+  └─────┘└─────┘└─────┘
+```
+
+- **特点**：单一编排者接收请求、分解任务、委派专家、监控进度、组装输出
+- **优势**：强故障恢复 + 高调试便利性
+- **劣势**：15-30% 延迟开销，超过 ~10 个并行 Agent 时成为瓶颈
+- **适用**：通用任务分解，生产环境首选
+
+#### 模式 2：Router（路由分发）
+
+```
+  请求 → [Router] → Agent A（匹配意图 1）
+                   → Agent B（匹配意图 2）
+                   → Agent C（匹配意图 3）
+```
+
+- **特点**：分类器分析请求意图，路由到单一专家
+- **优势**：快速、低成本
+- **劣势**：仅处理单意图请求，脆弱
+- **适用**：意图明确的客服/FAQ 场景
+
+#### 模式 3：Planner-Executor（规划-执行）
+
+```
+  ┌─────────┐    任务清单    ┌──────────┐
+  │ Planner │ ──────────→  │ 任务队列  │
+  │ (高推理) │              └────┬─────┘
+  └─────────┘                   │
+       ↑                 ┌──────┼──────┐
+       │                 ▼      ▼      ▼
+       │              [Exec] [Exec] [Exec]
+       └──── Plan Repair（失败时重写）────┘
+```
+
+- **特点**：高推理 Planner 生成任务清单 → Executor 并行执行
+- **关键工程挑战**：**Plan Repair** — 早期步骤失败时动态重写剩余计划
+- **适用**：复杂多步骤任务
+
+#### 模式 4：Sequential Pipeline（顺序流水线）
+
+```
+  Agent A → Agent B → Agent C → 输出
+```
+
+- **特点**：严格顺序执行
+- **优势**：可预测，适合有依赖关系的步骤
+- **劣势**：整体延迟 = 所有步骤之和
+- **适用**：代码审查流水线（格式检查 → 逻辑审查 → 安全扫描）
+
+#### 模式 5：DAG（有向无环图 / 状态机）
+
+```
+  ┌───┐     ┌───┐
+  │ A │──→  │ B │──→ ┌───┐
+  └───┘     └───┘    │ D │ → 输出
+  ┌───┐     ┌───┐    └───┘
+  │ A'│──→  │ C │──→
+  └───┘     └───┘
+```
+
+- **特点**：节点是 Agent，边是确定性转换规则（非 LLM 决策）
+- **优势**：最稳健，适合合规密集型工作流
+- **劣势**：牺牲自主性换取可靠性
+- **适用**：金融/医疗等强监管场景
+
+### 6.2 生产选型决策树
+
+```
+你的任务需要多少 Agent？
+  │
+  ├── 1 个 → 单 Agent + 丰富工具集
+  │
+  ├── 2-3 个 → Sequential Pipeline
+  │
+  ├── 3-10 个 → Supervisor 或 Planner-Executor
+  │
+  └── 10+ 个 → DAG（状态机）或分层 Supervisor
+```
+
+**关键数据**：57% 的企业 Agent 项目失败源自编排设计，而非单个 Agent 能力。生产系统通常组合 2-3 种模式。
+
+---
+
+## 七、Agent 安全与沙箱 — 零信任原则
+
+### 7.1 核心安全理念
+
+> **将每个 AI Agent 视为潜在的对手。** 它们是概率性的、可被注入的、会误解指令的，且能将小错误放大为重大故障。
+
+传统安全模型不适用于 Agent，因为 Agent：
+- 自主运行（无人类实时监督）
+- 动态解释自然语言（行为不确定）
+- 可被社会工程学攻击（Prompt 注入）
+
+### 7.2 权限模型
+
+#### 最小权限原则
+
+| 原则 | 实践 |
+|------|------|
+| 独立身份 | 每个 Agent 有独立服务账号，不共享用户凭证 |
+| 细粒度作用域 | 权限窄化到"特定动词 + 特定资源" |
+| 时间限制 | Token 在任务完成时过期（分钟级寿命） |
+| 权限分离 | 用户权限 ≠ Agent 权限（防止混淆代理攻击） |
+
+#### 工具审批
+
+- **高影响/不可逆操作**：必须通过 Agent 无法伪造的带外渠道获得人工审批
+- **策略定义**：明确 Agent 可调用的工具、可访问的数据源、可写入的系统
+- **输入/输出不可信**：所有工具的输入和输出都视为不可信数据
+
+### 7.3 沙箱策略
+
+#### 三级隔离方案
+
+| 级别 | 技术 | 隔离强度 | 性能 | 适用场景 |
+|------|------|---------|------|---------|
+| Level 1 | **MicroVM**（Firecracker, Kata） | 最强（独立内核） | 最慢 | 运行不可信代码 |
+| Level 2 | **gVisor** | 强（用户态内核） | 中等 | 通用 Agent 沙箱 |
+| Level 3 | **强化容器** | 中等（共享内核） | 最快 | 仅信任代码 |
+
+> 标准 Docker 容器**不够安全**——它们共享宿主内核。生产环境需要纵深防御：隔离边界 + 资源限制 + 网络控制 + 权限作用域。
+
+### 7.4 额外防护措施
+
+- **速率限制**：按 Agent / 会话 / 工具 / 资源分别设置
+- **熔断器**：异常行为触发自动中断
+- **全链路日志**：记录完整推理链（非单独日志行），支持 SIEM 集成
+- **凭证管理**：从第一天就规划轮换和撤销机制
+
+---
+
+## 八、基准评测 — 如何客观衡量 Coding Agent
+
+### 8.1 主要基准一览
+
+| 基准 | 评估内容 | 任务数 | 成本 | 特点 |
+|------|----------|--------|------|------|
+| **SWE-bench Verified** | 解决真实 GitHub Issue | 500 | $80-400 | 人工验证可解，推荐用于可信对比 |
+| **SWE-bench Pro** | 多文件多语言修改 | 1,865 | — | 平均 107 行跨 4.1 个文件，含 Python/JS/TS/Go/Rust |
+| **Terminal-Bench 2.0** | 终端多步骤任务 | — | — | 揭示 HumanEval 隐藏的差距 |
+| **HumanEval** | 单函数补全 | 164 | 低 | 前沿模型已饱和（~90%），无区分力 |
+| **LiveCodeBench** | 最新竞赛题 | 持续更新 | — | 抗数据污染 |
+
+### 8.2 前沿模型表现（2026 年 3-4 月）
+
+| 模型 | SWE-bench Verified | Terminal-Bench 2 | SWE-bench Pro |
+|------|-------------------|------------------|---------------|
+| Claude Opus 4.7 | **87.6%** | — | — |
+| Claude Opus 4.6 | ~80.9% | ~65.4% | ~45.9% |
+| GPT-5.3 Codex | ~77.3% | ~77.3% | ~41.8% |
+| Gemini 3.1 Pro | ~80.6% | ~77.3% | ~43.3% |
+
+**关键发现**：没有单一模型在所有基准上领先。SWE-bench 和 Terminal-Bench 的排名可能完全不同。
+
+### 8.3 基准的局限性
+
+- **SWE-bench**：OpenAI 确认所有前沿模型都存在训练数据污染
+- **HumanEval**：已不能有效区分前沿模型
+- **Terminal-Bench 2.0**：揭示了传统指标隐藏的差距——测试约束下的执行、失败后恢复、工具使用纪律
+
+**推荐评估组合**：SWE-bench Verified + Terminal-Bench 2.0 + LiveCodeBench，三者互补。
+
+---
+
+## 九、Coding Agent 竞争格局
+
+### 9.1 四大产品对比（2026 年 5 月）
+
+| 维度 | Claude Code | Cursor 3.0 | Windsurf 2.0 | Devin |
+|------|------------|------------|-------------|-------|
+| **形态** | CLI Agent，无 GUI | VS Code Fork + AI | Agentic IDE | 全自主 VM |
+| **核心能力** | 读整个代码库 + 执行命令 | 每次按键都有 AI | Agent Command Center | 独立 VM + 浏览器 + 终端 |
+| **自主度** | 高（Background Agent） | 中（人机协作优先） | 高（嵌入 Devin） | 最高（完全自主） |
+| **基准** | 87.6% SWE-bench | 不公布（协作式设计） | 40.08% | ~67% PR 合并率 |
+| **定价** | $20/月 | $20/月 | $20/月 | $20/月 + $2.25/ACU |
+| **用户规模** | 快速增长 | **100 万+** 付费用户 | 被 Cognition 收购 | — |
+
+### 9.2 新特性（2026 年）
+
+- **Cursor 3.0**（2026.4）：Agents Window（并行多 Agent）+ /worktree（隔离工作树）
+- **Claude Code**：Background Agent + 工作树隔离并行子任务
+- **Windsurf 2.0**：Agent Command Center + Kanban 任务管理 + Spaces（持久团队环境）
+- **Devin**：被 Cognition 收购，嵌入 Windsurf
+
+### 9.3 主流使用模式
+
+> **多数开发者采用混合策略**：Cursor 用于日常编码（人机协作），Claude Code 用于大型重构（自主执行）。
+
+---
+
+## 十、趋势总结与行动建议
+
+### 10.1 五大趋势
+
+| # | 趋势 | 影响 |
+|---|------|------|
+| 1 | **Harness > Model** | 投资 Harness 工程的回报高于追逐最新模型 |
+| 2 | **Agent OS 化** | Agent 将拥有完整的虚拟操作系统，冷启动毫秒级 |
+| 3 | **协议标准化** | MCP + A2A 双协议成为事实标准 |
+| 4 | **自进化 Harness** | AHE 证明 Harness 优化可自动化 |
+| 5 | **合规驱动** | EU AI Act 加速 Harness 工程标准化 |
+
+### 10.2 行动建议
+
+#### 对于个人开发者
+
+1. **掌握 Cursor + Claude Code 混合工作流**——日常编码用 Cursor，大型重构用 Claude Code
+2. **学写 Rules + Skills**——这是让 AI "记住"你偏好的最高杠杆动作
+3. **关注 MCP 生态**——接入 1-2 个与你工作相关的 MCP 服务（Wiki / Jira / 监控）
+
+#### 对于团队 Lead
+
+1. **建立团队 Harness 标准**——System Prompt 模板 + Tool Registry + Permission Model
+2. **部署 MCP 服务**——将团队 Wiki / Jira / CI 接入 Cursor
+3. **建立评估管线**——用 Harness-Evals 持续监控 Agent 输出质量
+
+#### 对于架构师 / 平台工程师
+
+1. **评估 agentOS**——如果你在构建多 Agent 平台，agentOS 可将成本降低 32 倍
+2. **关注 AHE**——Harness 自进化是下一个竞争壁垒
+3. **准备 EU AI Act 合规**——2026 年 8 月前确保 Harness 能产出合规审计制品
+
+---
+
+## 参考资源
+
+### Agent OS
+- [agentOS (Rivet)](https://rivet.dev/agent-os/)
+- [Qualixar OS 论文](https://arxiv.org/abs/2604.06392)
+- [Agno v2.5 博客](https://www.agno.com/blog/the-agent-stack-is-finally-complete)
+
+### Harness 工程
+- [Agentic Harness Engineering 论文](https://arxiv.org/pdf/2604.25850)
+- [Open Harness](https://open-harness.github.io/open-harness/)
+- [Harness-Evals](https://github.com/harness/harness-evals)
+- [Harness 完全指南](https://harness-engineering.ai/blog/agent-harness-complete-guide/)
+
+### 协议
+- [MCP 2026 路线图](https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/)
+- [MCP 生态现状](https://chatforest.com/guides/mcp-ecosystem-2026-state-of-the-standard/)
+- [A2A 协议规范](https://github.com/google/A2A)
+
+### 记忆架构
+- [xMemory 论文](https://arxiv.org/pdf/2602.02007v2)
+- [memU 框架](https://yuv.ai/blog/memu)
+- [OpenClaw 记忆架构](https://github.com/coolmanns/openclaw-memory-architecture)
+
+### 编排与安全
+- [Agent 编排模式 2026](https://thinking.inc/en/blue-ocean/agentic/agent-orchestration-patterns/)
+- [Agent 安全最佳实践](https://workos.com/blog/ai-agent-access-control-best-practices)
+- [Agent 沙箱策略](https://northflank.com/blog/how-to-sandbox-ai-agents)
+
+### 基准评测
+- [SWE-bench 2026](https://www.morphllm.com/swe-benchmark)
+- [Terminal-Bench 2.0](https://benchlm.ai/blog/posts/terminal-bench-2-agentic-benchmark)
+- [AI 编码基准 2026 全览](https://www.morphllm.com/ai-coding-benchmarks-2026)
+
+### Coding Agent 对比
+- [Coding Agents 2026 对比](https://agentmarketcap.ai/blog/2026/04/05/coding-agents-compared-claude-code-cursor-windsurf-devin)
+- [Cursor vs Claude Code vs Windsurf 2026](https://www.shareuhack.com/en/posts/cursor-vs-claude-code-vs-windsurf-2026)
+
+---
+
+> **声明**：本报告数据截至 2026 年 5 月 14 日，AI Agent 领域变化极快，建议持续关注上述资源的更新。
